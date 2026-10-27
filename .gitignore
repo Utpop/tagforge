@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 系统
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 运行时产物（备份目录默认写在用户目录，这里兜底）
+.tagforge/
+backups/
+*.log

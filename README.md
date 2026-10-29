@@ -80,8 +80,8 @@ python -m venv .venv
   字号同样按倍率换算，因此 125% / 150% / 200% 下版式完全等比，不会出现"字大框小"。
 - 启动时用 `GetDpiForSystem()` 读取系统 DPI 换算缩放倍率；
   若窗口会超出屏幕则自动逐档回退；也可用 `--scale` 或环境变量 `TAGFORGE_SCALE` 覆盖。
-- 字体：随包的 **HarmonyOS Sans SC**（`assets/HarmonyOS_Sans_SC.ttf`），
-  通过 `AddFontResourceExW(FR_PRIVATE)` 注册为进程私有字体，不污染系统字体列表；
+- 字体：使用**系统默认 UI 字体**（Tk 的 `TkDefaultFont` 字族，Windows 上即 Segoe UI，
+  中文由系统字体链接自动回退到微软雅黑一类字形），不随包字体，换机器自动跟随系统；
   文件列与技术信息使用等宽 Consolas。
 
 ## 代码结构
@@ -94,7 +94,6 @@ tagforge/
 │  ├─ adapters.py    四种写入引擎 + 封面读写 + 技术信息探测
 │  ├─ naming.py      文件名 ⇄ 标签 双向模板引擎
 │  └─ library.py     扫描 / 批量写入 / 快照回滚 / 撤销 / 重命名
-├─ assets/           HarmonyOS Sans SC 字体
 ├─ tests/            演示库生成 + 后端流程测试 + GUI 端到端测试
 └─ samples/          测试音频（DemoLibrary 为 23 曲演示库）
 ```

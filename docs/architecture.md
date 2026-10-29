@@ -88,7 +88,7 @@
 | F14 | 保存暂存（Ctrl+S，徽标显脏字段数） | 「保存修改」 | `save` | `apply_changes(mode=overwrite)` |
 | F15 | 撤销上一步（整批回退） | 「撤销」 | `undo_last` / `ConfirmUndo` | `list_backups` / `undo` |
 | F16 | 计数与空态 | 顶栏、批量条 | `dirty_count` / 各 `draw_*` | — |
-| F17 | 字体与 DPI 适配 | 启动 | `load_ui_font` / `detect_scale` | `AddFontResourceExW`、`GetDpiForSystem` |
+| F17 | 字体与 DPI 适配 | 启动 | `resolve_ui_font` / `detect_scale` | `TkDefaultFont`、`GetDpiForSystem` |
 | F18 | 安全底账（写前快照、失败回滚） | 隐式（F15 可见） | — | `snapshot` / `_restore_one` |
 
 ## 4. 调用关系（4 条主链）

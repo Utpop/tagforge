@@ -48,7 +48,7 @@ DANGER = "#E2564C"
 INK = "#0F1622"
 CHK_EDGE = "#3A414D"
 
-FONT_UI = "Microsoft YaHei UI"     # 未注册成功时的回退字族
+FONT_UI = "Segoe UI"             # 启动时替换为系统默认 UI 字族
 FONT_MONO = "Consolas"
 SCALE = 1.0                      # 设计单位 -> 设备像素的倍率（由 DPI 决定）
 
@@ -57,13 +57,6 @@ def S(value: float) -> int:
     """设计单位转设备像素。所有绘制坐标都过这个函数。"""
     return int(round(value * SCALE))
 
-
-_PKG_DIR = os.path.dirname(os.path.abspath(__file__))
-FONT_CANDIDATES = [
-    os.path.join(_PKG_DIR, "assets", "HarmonyOS_Sans_SC.ttf"),
-    os.path.join(os.path.dirname(_PKG_DIR), "assets", "HarmonyOS_Sans_SC.ttf"),
-]
-FONT_FILE = next((p for p in FONT_CANDIDATES if os.path.exists(p)), FONT_CANDIDATES[0])
 
 # ---------------------------------------------------------------- 布局常量
 W, H = 1440, 900
@@ -93,25 +86,17 @@ def F(size: int, bold: bool = False, mono: bool = False):
     return (FONT_MONO if mono else FONT_UI, -max(1, S(abs(size))), "bold" if bold else "normal")
 
 
-def load_ui_font() -> str:
-    """把随包的 HarmonyOS Sans SC 注册为进程私有字体，并切换到该字族。
+def resolve_ui_font(root: tk.Tk) -> str:
+    """采用系统默认 UI 字体（Tk 的 TkDefaultFont 字族）。
 
-    Tk 没有加载字体文件的 API，所以走 Windows 的 AddFontResourceExW
-    （FR_PRIVATE = 0x10）：字体会话内可见、不污染系统字体列表，进程退出自动释放。
+    不再随包字体：Windows 上是 Segoe UI，中文由系统字体链接自动回退到
+    微软雅黑一类字形；换机器 / 换主题时界面自动跟随系统。
     """
     global FONT_UI
     try:
-        gdi = ctypes.windll.gdi32
-        gdi.AddFontResourceExW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint, ctypes.c_void_p]
-        gdi.AddFontResourceExW.restype = ctypes.c_int
-        if os.path.exists(FONT_FILE) and gdi.AddFontResourceExW(FONT_FILE, 0x10, None):
-            families = set(tkfont.families())
-            for candidate in ("HarmonyOS Sans SC", "HarmonyOS Sans"):
-                if candidate in families:
-                    FONT_UI = candidate
-                    break
-            else:
-                FONT_UI = "HarmonyOS Sans SC"
+        family = tkfont.nametofont("TkDefaultFont").cget("family")
+        if family:
+            FONT_UI = family
     except Exception:
         pass
     return FONT_UI
@@ -382,7 +367,7 @@ class PhEntry(tk.Entry):
 # ---------------------------------------------------------------- 主窗口
 class TagForgeApp:
     def __init__(self, root: tk.Tk, start_dir: str | None = None):
-        load_ui_font()
+        resolve_ui_font(root)
         self.root = root
         self.root.title("TagForge")
         self.root.configure(bg=BG)
@@ -1440,10 +1425,13 @@ class RenameDialog(Dialog):
                     (old, "bad"), (row.get("rel") or "—", "bad"), (row["error"], "bad")]})
             elif row.get("unchanged"):
                 self.rows.append({"bad": False, "cells": [
-                    (old, "faint"), (row.get("rel") or old, "faint"), ("未变化", "faint")]})
+                    (old, "faint"), (old, "faint"), ("未变化", "faint")]})
             else:
+                new_name = row.get("rel") or old
+                if self.keep_dir:      # 保留目录结构时只显示文件名，目录不变
+                    new_name = new_name.rsplit("/", 1)[-1]
                 self.rows.append({"bad": False, "cells": [
-                    (old, "faint"), (row.get("rel") or old, "amber"), ("可重命名", "ok")]})
+                    (old, "faint"), (new_name, "amber"), ("可重命名", "ok")]})
         total_conflict = sum(1 for r in self.plan if r.get("error"))
         movable = sum(1 for r in self.plan if r.get("target") and not r.get("error") and not r.get("unchanged"))
         parts = []
@@ -1566,12 +1554,9 @@ def main(argv: list[str] | None = None) -> int:
     SCALE = max(1.0, SCALE)
 
     root.geometry(f"{S(W)}x{S(H)}+40+40")
-    app = TagForgeApp(root, start)
+    TagForgeApp(root, start)
     root.mainloop()
-    try:
-        ctypes.windll.gdi32.RemoveFontResourceExW(FONT_FILE, 0x10, None)
-    except Exception:
-        pass
+    return 0
     return 0
 
 

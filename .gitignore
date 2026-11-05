@@ -14,3 +14,8 @@ desktop.ini
 .tagforge/
 backups/
 *.log
+
+# 打包产物（exe 通过 Release 分发，不入库）
+build/
+dist/
+*.spec

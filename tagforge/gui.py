@@ -58,6 +58,118 @@ def S(value: float) -> int:
     return int(round(value * SCALE))
 
 
+def asset_path(name: str) -> str | None:
+    """定位随包资源。兼容源码运行与 PyInstaller 单文件包。"""
+    pkg = os.path.dirname(os.path.abspath(__file__))
+    roots = []
+    if getattr(sys, "_MEIPASS", None):          # 打包后资源被解到临时目录
+        roots.append(os.path.join(sys._MEIPASS, "assets"))
+    roots += [
+        os.path.join(pkg, "assets"),
+        os.path.join(os.path.dirname(pkg), "assets"),
+    ]
+    for root in roots:
+        path = os.path.join(root, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+# 预生成的图标尺寸（见 tools/make_icon.py），正好覆盖 100%–200% 的常见缩放
+ICON_SIZES = (16, 20, 25, 30, 35, 40, 48, 60)
+
+
+def load_icon(design_px: int):
+    """按设计尺寸取最接近的预渲染 PNG，避免 Tk 只能整数倍缩放导致的模糊。"""
+    target = S(design_px)
+    exact = asset_path(f"app_icon_{target}.png")
+    if exact:
+        return tk.PhotoImage(file=exact)
+    bigger = [s for s in ICON_SIZES if s >= target]
+    size = bigger[0] if bigger else ICON_SIZES[-1]
+    path = asset_path(f"app_icon_{size}.png")
+    if not path:
+        return None
+    img = tk.PhotoImage(file=path)
+    factor = max(1, round(size / target))
+    return img.subsample(factor, factor) if factor > 1 else img
+
+
+def _win_set_icons(root: tk.Tk, ico: str) -> bool:
+    """直接给窗口句柄发 WM_SETICON。
+
+    Tk 9 的 `wm iconbitmap` 在 Windows 上不生效（调用不报错，但 `wm iconbitmap`
+    查询仍为空，标题栏退回系统占位图标），所以这里绕开 Tk 用 Win32。
+    """
+    try:
+        user32 = ctypes.windll.user32
+        user32.LoadImageW.restype = ctypes.c_void_p
+        user32.LoadImageW.argtypes = [
+            ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint,
+            ctypes.c_int, ctypes.c_int, ctypes.c_uint,
+        ]
+        user32.SendMessageW.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p,
+        ]
+        hwnd = int(root.wm_frame(), 16)
+    except Exception:
+        return False
+
+    IMAGE_ICON, LR_LOADFROMFILE, WM_SETICON = 1, 0x10, 0x0080
+    ICON_SMALL, ICON_BIG = 0, 1
+    ok = False
+    for size, kind in ((16, ICON_SMALL), (32, ICON_BIG), (48, ICON_BIG)):
+        handle = user32.LoadImageW(None, ico, IMAGE_ICON, size, size, LR_LOADFROMFILE)
+        if handle:
+            user32.SendMessageW(hwnd, WM_SETICON, kind, handle)
+            ok = True
+    return ok
+
+
+def apply_window_icon(root: tk.Tk) -> None:
+    """标题栏 + 任务栏图标。
+
+    Windows 上必须先设 AppUserModelID，否则任务栏会沿用 python.exe / 打包器的
+    图标与分组；标题栏小图标则由 WM_SETICON 决定，Tk 的 iconbitmap 不可靠。
+    """
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("TagForge.Desktop")
+    except Exception:
+        pass
+
+    png = asset_path("app_icon.png")
+    if png:
+        try:
+            img = tk.PhotoImage(file=png)
+            root.iconphoto(True, img)
+            root._app_icon = img          # 保持引用，否则会被回收成空白图标
+        except tk.TclError:
+            pass
+
+    ico = asset_path("app_icon.ico")
+    if not ico:
+        return
+    if os.name == "nt":
+        def install() -> None:
+            if not _win_set_icons(root, ico):
+                try:                      # 兜底：非 Windows 或无句柄时走 Tk
+                    root.iconbitmap(default=ico)
+                except tk.TclError:
+                    pass
+
+        install()
+        # 窗口映射后系统可能重绘标题栏，再铺一次更稳
+        try:
+            root.after(300, install)
+        except Exception:
+            pass
+    else:
+        try:
+            root.iconbitmap(default=ico)
+        except tk.TclError:
+            pass
+
+
 # ---------------------------------------------------------------- 布局常量
 W, H = 1440, 900
 A_H, B_H, HDR_H, ROW_H = 92, 82, 34, 29
@@ -72,6 +184,15 @@ W_FILE, W_FLEX, W_NUM, W_COVER = 278, 115, 62, 46
 PAD = 22
 
 GRID_FIELDS = ["title", "artist", "album", "albumartist", "year", "track", "disc", "genre"]
+
+# Tab 在表格里横向移动的顺序与每列几何
+EDIT_COLUMNS = ("title", "artist", "album", "albumartist", "year", "track", "disc", "genre")
+COLUMN_GEOM = {
+    "title": (X_TITLE, W_FLEX), "artist": (X_ART, W_FLEX),
+    "album": (X_ALB, W_FLEX), "albumartist": (X_AART, W_FLEX),
+    "year": (X_YEAR, W_NUM), "track": (X_TRACK, W_NUM),
+    "disc": (X_DISC, W_NUM), "genre": (X_GENRE, W_FLEX),
+}
 FIELD_LABELS = {
     "title": "标题", "artist": "艺术家", "album": "专辑", "albumartist": "专辑艺术家",
     "year": "年份", "track": "音轨", "disc": "碟号", "genre": "流派",
@@ -370,6 +491,7 @@ class TagForgeApp:
         resolve_ui_font(root)
         self.root = root
         self.root.title("TagForge")
+        apply_window_icon(root)
         self.root.configure(bg=BG)
         self.root.resizable(False, False)
 
@@ -395,6 +517,7 @@ class TagForgeApp:
         self.recursive = True
         self._probe_cache: dict[str, dict] = {}
         self._photos: dict[str, object] = {}
+        self._logo = None
         self.last_backup: str | None = None
         self.truncated = False
 
@@ -545,10 +668,14 @@ class TagForgeApp:
         p = self.p
         p.rect(0, 0, W, A_H, PANEL)
 
-        # logo：20×20 圆角蓝块 + 三根声波竖条
-        p.rrect(14, 15, 20, 20, 6, fill=ACCENT)
-        for i, hh in enumerate((6, 10, 8)):
-            p.rect(19 + i * 4, 30 - hh, 2, hh, INK)
+        # logo：应用图标（缺失时退回手绘标记，保证界面不会开天窗）
+        logo = self.logo_photo()
+        if logo is not None:
+            p.image(14, 13, logo)
+        else:
+            p.rrect(14, 15, 20, 20, 6, fill=ACCENT)
+            for i, hh in enumerate((6, 10, 8)):
+                p.rect(19 + i * 4, 30 - hh, 2, hh, INK)
         p.text(42, 25, "TagForge", F(14, True), TEXT)
         meta = f"{len(self.records)} 个文件 · {self.root_dir}"
         if self.truncated:
@@ -847,6 +974,15 @@ class TagForgeApp:
         if not rec.get("has_cover"):
             p.text(x + 50, y + 74, "无封面", F(11), FAINT, anchor="center")
 
+    def logo_photo(self):
+        # 单独缓存：_photos 会在重新扫描时清空（那是封面缓存），logo 不该跟着丢
+        if self._logo is None:
+            try:
+                self._logo = load_icon(20)
+            except Exception:
+                self._logo = None
+        return self._logo
+
     def probe(self, rec: dict) -> dict:
         path = rec["path"]
         if path not in self._probe_cache:
@@ -1011,6 +1147,9 @@ class TagForgeApp:
         e.bind("<Return>", lambda ev: self._commit_edit())
         e.bind("<Escape>", lambda ev: self._cancel_edit())
         e.bind("<FocusOut>", lambda ev: self._commit_edit())
+        e.bind("<Tab>", lambda ev: self._tab_edit(rec, field, 1))
+        e.bind("<Shift-Tab>", lambda ev: self._tab_edit(rec, field, -1))
+        e.bind("<ISO_Left_Tab>", lambda ev: self._tab_edit(rec, field, -1))
         self.editor = e
         self.edit_target = (rec["path"], field)
         self.redraw()
@@ -1037,6 +1176,38 @@ class TagForgeApp:
                 if not patch:
                     pass
         self.redraw()
+
+    def _tab_edit(self, rec, field, delta):
+        """提交当前单元格并横向/纵向移动到下一个可编辑单元格。"""
+        self._commit_edit()
+        rows = self.visible()
+        paths = [r["path"] for r in rows]
+        if rec["path"] not in paths or field not in EDIT_COLUMNS:
+            return "break"
+
+        row_i = paths.index(rec["path"])
+        col_i = EDIT_COLUMNS.index(field) + delta
+        if col_i >= len(EDIT_COLUMNS):
+            col_i, row_i = 0, row_i + 1
+        elif col_i < 0:
+            col_i, row_i = len(EDIT_COLUMNS) - 1, row_i - 1
+        if not (0 <= row_i < len(rows)):
+            return "break"
+
+        target = rows[row_i]
+        if target.get("error"):        # 解析失败的行没有可编辑字段
+            return "break"
+
+        capacity = int((H - MAIN_Y - HDR_H - 1) / ROW_H)
+        if row_i < self.scroll:
+            self.scroll = row_i
+        elif row_i >= self.scroll + capacity:
+            self.scroll = row_i - capacity + 1
+
+        x, w = COLUMN_GEOM[EDIT_COLUMNS[col_i]]
+        y = MAIN_Y + HDR_H + 1 + (row_i - self.scroll) * ROW_H
+        self.begin_edit(target, EDIT_COLUMNS[col_i], x, y, w)
+        return "break"
 
     def _cancel_edit(self):
         if self.editor is not None:

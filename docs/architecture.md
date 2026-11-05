@@ -214,6 +214,16 @@ record ────────────→ staged ────────�
   与确认框"这些修改会保留"的承诺一致。
 - `scan(preserve=False)`（默认，切目录/改递归时）才清空 staged / checks / active。
 
+### 6.5 资源与图标
+
+- `assets/` 由 `tools/make_icon.py` 生成：去掉白底、裁边、输出多尺寸 PNG 与 BMP 条目的 `.ico`。
+- `gui.asset_path()` 依次查 `sys._MEIPASS/assets`（PyInstaller 解包目录）、包内 `assets/`、上一级 `assets/`，
+  源码运行与单文件 exe 共用同一套路径解析。
+- 标题栏 / 任务栏图标：Windows 上用 `WM_SETICON`（`_win_set_icons`）直接给窗口句柄发消息，
+  并设置 `AppUserModelID`；Tk 9 的 `wm iconbitmap` 在 Windows 上不生效，只能作兜底。
+- 顶部 logo 用 `load_icon(20)` 取最接近的预渲染尺寸（20/25/30/35/40…），
+  避免 Tk 只能整数倍缩放导致的模糊；图标缺失时退回手绘标记，界面不会开天窗。
+
 ## 7. 两条数据流约束
 
 1. **单向读**：磁盘 → 适配器 → canonical 字段 → 视图。视图永不改 `record.fields`。

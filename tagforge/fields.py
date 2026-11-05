@@ -12,6 +12,7 @@ MP4 是 aART、APEv2 是 "Album Artist"。若不做抽象，
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -59,12 +60,31 @@ def empty_record() -> dict:
     return {k: "" for k in FIELD_KEYS if k != "cover"}
 
 
-def split_values(raw: str) -> list[str]:
-    """把 UI 输入拆成多值列表。"""
+def split_values(raw) -> list[str]:
+    """把 UI 输入或快照里的原始多值拆成列表。
+
+    同时接受字符串（`"A; B"`）与列表（`["A", "B"]`）。
+    后者用于撤销：快照记录的是原始帧的 text 列表，不能再走字符串拼接，
+    否则一个内部含分号的单值会被错误地拆成两个值。
+    """
     if not raw:
         return []
-    parts = [p.strip() for p in raw.split(";")]
+    if isinstance(raw, (list, tuple)):
+        return [str(v).strip() for v in raw if str(v).strip()]
+    parts = [p.strip() for p in str(raw).split(";")]
     return [p for p in parts if p]
+
+
+def normalize_year(raw: str) -> str:
+    """把 '2013'、'2013-05-17'、'2013/05' 统一成 '2013'。
+
+    年份是 4 位年，完整日期属于另一个字段；不归一化会让"按年份排序"
+    把所有带日期的行当成 0（ID3v2.4 的 TDRC 常带完整日期）。
+    无法识别为 4 位年的输入原样返回。
+    """
+    raw = (raw or "").strip()
+    match = re.match(r"^(\d{4})(?:[-/.]\d{1,2}){0,2}$", raw)
+    return match.group(1) if match else raw
 
 
 def normalize_number(raw: str) -> str:
@@ -79,20 +99,28 @@ def clean_patch(patch: dict) -> dict:
     """过滤掉未知键，规范化数值与空白。
 
     约定：值为 None 表示"删除该字段"，空字符串同样视为删除。
+    cover 例外：None 与空值都表示"不改动"，删除必须显式给 "remove"，
+    因为封面是二进制，误把"没选图"当成"删图"代价太大。
     """
     out: dict = {}
     for key, value in patch.items():
         if key not in FIELD_BY_KEY:
             continue
         if key == "cover":
-            if value is not None:
+            if value is not None and value != "":
                 out[key] = value
             continue
         if value is None:
             out[key] = None
             continue
-        text = str(value).strip()
+        if isinstance(value, (list, tuple)):
+            values = split_values(value)
+            text = VALUE_SEPARATOR.join(values) if values else ""
+        else:
+            text = str(value).strip()
         if key in NUMERIC_FIELDS:
             text = normalize_number(text)
+        elif key == "year":
+            text = normalize_year(text)
         out[key] = text or None
     return out

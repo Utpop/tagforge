@@ -396,6 +396,7 @@ class TagForgeApp:
         self._probe_cache: dict[str, dict] = {}
         self._photos: dict[str, object] = {}
         self.last_backup: str | None = None
+        self.truncated = False
 
         self._build_inputs()
         self.canvas.bind("<Button-1>", self._on_click)
@@ -415,6 +416,7 @@ class TagForgeApp:
     # ---------------- 输入控件（一次创建，随画布定位） ----------------
     def _build_inputs(self):
         self.e_path = PhEntry(self.canvas, "", color=DIM, font=F(12, mono=True))
+        self.e_path.bind("<Return>", lambda e: self.scan_from_entry())
         self.e_path.place(x=S(14 + 27), y=S(46 + 7), width=S(300 - 27 - 12), height=S(17))
         self.e_search = PhEntry(self.canvas, "搜索文件名…")
         self.e_search.place(x=S(955 + 26), y=S(46 + 7), width=S(190 - 26 - 10), height=S(17))
@@ -428,11 +430,20 @@ class TagForgeApp:
             self.b_fields[key] = e
 
     # ---------------- 数据 ----------------
-    def scan(self, path: str | None = None, silent: bool = False):
+    def scan(self, path: str | None = None, silent: bool = False, preserve: bool = False):
+        """重新扫描。
+
+        preserve=True 时保留当前行、勾选与未保存的暂存值——
+        保存/批量/撤销之后不应该把用户的选择上下文清空。
+        """
+        prev_active = self.active
+        prev_checks = set(self.checks)
+        prev_staged = dict(self.staged)
         if path:
             self.root_dir = path
         if not self.root_dir or not os.path.isdir(self.root_dir):
             self.records = []
+            self.truncated = False
             return
         try:
             data = library.scan(self.root_dir, recursive=self.recursive)
@@ -442,15 +453,20 @@ class TagForgeApp:
             self.records = []
             return
         self.records = data["records"]
-        self.staged.clear()
-        self.checks.clear()
+        self.truncated = bool(data.get("truncated"))
         self.scroll = 0
         self._probe_cache.clear()
         self._photos.clear()
-        if self.records:
-            self.active = self.records[0]["path"]
+
+        if preserve:
+            self.staged = {p: v for p, v in prev_staged.items() if self.record(p)}
+            self.checks = {p for p in prev_checks if self.record(p)}
+            self.active = prev_active if self.record(prev_active) else (
+                self.records[0]["path"] if self.records else None)
         else:
-            self.active = None
+            self.staged.clear()
+            self.checks.clear()
+            self.active = self.records[0]["path"] if self.records else None
         self.refresh_backup_label()
 
     def record(self, path: str | None) -> dict | None:
@@ -479,7 +495,8 @@ class TagForgeApp:
                 if q in rec["rel"].lower():
                     return True
                 return any(q in str(self.value(rec, f)).lower() for f in
-                           ("title", "artist", "album", "albumartist", "year", "genre", "composer"))
+                           ("title", "artist", "album", "albumartist", "year", "genre",
+                            "composer", "track", "disc", "comment"))
             rows = [r for r in rows if match(r)]
         if self.sort_key == "rel":
             return sorted(rows, key=lambda r: r["rel"].lower(), reverse=self.sort_dir < 0)
@@ -516,6 +533,7 @@ class TagForgeApp:
 
     # ---------------- 渲染 ----------------
     def redraw(self):
+        Painter.current = self.p        # 兜底：任何路径都不该让绘制指向别的画布
         self.p.hits.clear()
         self.canvas.delete("all")
         self.draw_zone_a()
@@ -533,7 +551,9 @@ class TagForgeApp:
             p.rect(19 + i * 4, 30 - hh, 2, hh, INK)
         p.text(42, 25, "TagForge", F(14, True), TEXT)
         meta = f"{len(self.records)} 个文件 · {self.root_dir}"
-        p.text(114, 25, meta, F(12), DIM, width=740)
+        if self.truncated:
+            meta = f"{len(self.records)} 个文件（已达扫描上限，更多文件未列出）· {self.root_dir}"
+        p.text(114, 25, meta, F(12), DIRTY if self.truncated else DIM, width=740)
         if self._backup_text:
             p.text(1426, 25, self._backup_text, F(12), FAINT, anchor="e")
 
@@ -598,29 +618,45 @@ class TagForgeApp:
 
     def draw_table(self):
         p = self.p
+        rows = self.visible()
         p.rect(0, MAIN_Y, TABLE_W, H, BG)
         p.rect(0, MAIN_Y, TABLE_W, HDR_H, PANEL)
         p.line(0, MAIN_Y + HDR_H, TABLE_W, MAIN_Y + HDR_H, LINE)
         p.rect(TABLE_W, MAIN_Y, 1, H - MAIN_Y, LINE_SOFT)
 
-        # 表头
+        # 表头：勾选框按 未选 / 半选 / 全选 三态绘制
         hy = MAIN_Y + HDR_H / 2
-        p.rrect(14.5, MAIN_Y + 10.5, 13, 13, 3, fill=ACCENT, outline=ACCENT)
-        p.rect(17, MAIN_Y + 16.2, 8, 2, INK)
+        rows_now = rows          # 复用上面算好的一份，避免重复排序
+        checked = sum(1 for r in rows_now if r["path"] in self.checks)
+        state = "all" if rows_now and checked == len(rows_now) else ("some" if checked else "none")
+        p.rrect(14.5, MAIN_Y + 10.5, 13, 13, 3,
+                fill=ACCENT if state == "all" else (None if state == "none" else ACCENT),
+                outline=ACCENT if state != "none" else CHK_EDGE)
+        if state == "all":
+            p.polyline([(17, hy), (19.6, hy + 2.6), (25, hy - 3.2)], INK, 2, "round", "round")
+        elif state == "some":
+            p.rect(17, hy - 1, 8, 2, INK)
         p.hit(10, MAIN_Y + 6, 22, 22, self.toggle_all)
 
         headers = [
-            (X_FILE, "文件"), (X_TITLE, "标题"), (X_ART, "艺术家"), (X_ALB, "专辑"),
-            (X_AART, "专辑艺术家"), (X_YEAR, "年份"), (X_TRACK, "音轨"),
-            (X_DISC, "碟号"), (X_GENRE, "流派"), (X_COVER, "封面"),
+            (X_FILE, "文件", "rel"), (X_TITLE, "标题", "title"), (X_ART, "艺术家", "artist"),
+            (X_ALB, "专辑", "album"), (X_AART, "专辑艺术家", "albumartist"),
+            (X_YEAR, "年份", "year"), (X_TRACK, "音轨", "track"), (X_DISC, "碟号", "disc"),
+            (X_GENRE, "流派", "genre"), (X_COVER, "封面", None),
         ]
-        for x, label in headers:
-            color = ACCENT if label == "标题" else DIM
+        for x, label, key in headers:
+            sorted_here = key is not None and key == self.sort_key
+            color = ACCENT if sorted_here else DIM
             p.text(x + PAD, hy, label, F(12), color)
-            if label == "标题":
+            if sorted_here:
                 ax = x + PAD + p.measure(label, F(12)) + 4
-                p.polyline([(ax, hy - 1.5), (ax + 4.5, hy + 3), (ax + 9, hy - 1.5)],
-                           ACCENT, 1.4, "round", "round")
+                # 升序画下箭头，降序画上箭头
+                if self.sort_dir > 0:
+                    p.polyline([(ax, hy - 1.5), (ax + 4.5, hy + 3), (ax + 9, hy - 1.5)],
+                               ACCENT, 1.4, "round", "round")
+                else:
+                    p.polyline([(ax, hy + 3), (ax + 4.5, hy - 1.5), (ax + 9, hy + 3)],
+                               ACCENT, 1.4, "round", "round")
         for label, x, kind in (("文件", X_FILE, "rel"), ("标题", X_TITLE, "title"),
                                ("艺术家", X_ART, "artist"), ("专辑", X_ALB, "album"),
                                ("专辑艺术家", X_AART, "albumartist"), ("年份", X_YEAR, "year"),
@@ -629,7 +665,6 @@ class TagForgeApp:
             p.hit(x, MAIN_Y, W_FLEX if kind not in ("rel", "year", "track", "disc") else
                   (W_FILE if kind == "rel" else W_NUM), HDR_H, lambda k=kind: self.sort_by(k))
 
-        rows = self.visible()
         top = MAIN_Y + HDR_H + 1
         capacity = int((H - top) / ROW_H)
         self.scroll = max(0, min(self.scroll, max(0, len(rows) - capacity)))
@@ -638,10 +673,14 @@ class TagForgeApp:
 
     def draw_row(self, rec: dict, y: int):
         p = self.p
-        if rec["path"] == self.active:
-            p.rect(0, y, TABLE_W, ROW_H, ROW_CURRENT)
-        elif rec.get("error"):
+        is_active = rec["path"] == self.active
+        if rec.get("error"):
+            # 异常底色优先，当前行改用左侧主色竖条表达，两种状态可叠加辨认
             p.rect(0, y, TABLE_W, ROW_H, ROW_ERROR)
+            if is_active:
+                p.rect(0, y, 2, ROW_H, ACCENT)
+        elif is_active:
+            p.rect(0, y, TABLE_W, ROW_H, ROW_CURRENT)
 
         cy = y + ROW_H / 2
         # 勾选框
@@ -695,7 +734,9 @@ class TagForgeApp:
         for x, field, w in cols:
             val = self.value(rec, field)
             empty = not val
-            color = FAINT if empty else (DIRTY if self.is_dirty(rec, field) else TEXT)
+            dirty = self.is_dirty(rec, field)
+            # 脏值优先判：清空的字段是"待删除"，必须和"从未填过"区分开
+            color = DIRTY if dirty else (FAINT if empty else TEXT)
             p.text(x + PAD, cy, "—" if empty else val, F(13), color, width=w - PAD - 8)
             p.hit(x, y, w, ROW_H, lambda r=rec, f=field, cx=x, cw=w, ry=y:
                   self.begin_edit(r, f, cx, ry, cw))
@@ -721,7 +762,7 @@ class TagForgeApp:
             return
 
         base = rec["rel"].rsplit("/", 1)[-1]
-        tag = ENGINE_TAG.get(rec.get("engine") or "", (rec.get("ext") or "").lstrip(".").upper())
+        tag = self.engine_badge(rec)
         tw = max(54, p.measure(tag, F(10, mono=True)) + 12)
         p.text(x, 199, base, F(12, mono=True), TEXT, width=inner - tw - 10)
         p.rrect(W - 14 - tw, 191, tw, 17, 4, fill=CTRL, outline=LINE)
@@ -752,9 +793,13 @@ class TagForgeApp:
         y += 54
 
         p.text(x, y + 8, "备注", F(11), FAINT)
-        p.rrect(x, y + 20, inner, 40, 6, fill=CTRL, outline=LINE)
         note = self.value(rec, "comment")
-        p.text(x + 8, y + 32, note or "—", F(13), TEXT if note else FAINT, width=inner - 16)
+        dirty_note = self.is_dirty(rec, "comment")
+        p.rrect(x, y + 20, inner, 40, 6, fill=CTRL, outline=ACCENT if dirty_note else LINE)
+        p.text(x + 8, y + 32, note or "—", F(13),
+               DIRTY if dirty_note else (TEXT if note else FAINT), width=inner - 16)
+        p.hit(x, y + 20, inner, 40,
+              lambda: self.begin_edit(rec, "comment", x, y + 20, inner, height=40, pad=0))
 
         info = self.probe(rec)
         size = rec["size"] / 1048576
@@ -772,13 +817,24 @@ class TagForgeApp:
         for i, line in enumerate(tech):
             p.text(x, 832 + i * 18, line, F(11, mono=True), FAINT, width=inner)
 
+    def engine_badge(self, rec: dict) -> str:
+        """引擎徽标：ID3 显示文件的真实版本，而不是固定写 v2.4。"""
+        engine = rec.get("engine") or ""
+        if engine == "id3":
+            version = (self.probe(rec) or {}).get("id3_version")
+            return f"ID3v{version}" if version else "ID3"
+        return ENGINE_TAG.get(engine, (rec.get("ext") or "").lstrip(".").upper() or "?")
+
     def draw_field(self, label, value, x, y, w, rec, key):
         p = self.p
         p.text(x, y + 8, label, F(11), FAINT)
         dirty = self.is_dirty(rec, key)
-        p.rrect(x, y + 20, w, 26, 6, fill=CTRL, outline=LINE)
+        p.rrect(x, y + 20, w, 26, 6, fill=CTRL, outline=ACCENT if dirty else LINE)
         color = DIRTY if dirty else (TEXT if value else FAINT)
         p.text(x + 8, y + 33, value or "—", F(13), color, width=w - 16)
+        # 面板与表格共用同一份 staged：点这里也能改，不必回到表格
+        p.hit(x, y + 20, w, 26,
+              lambda r=rec, k=key: self.begin_edit(r, k, x, y + 20, w, height=26, pad=0))
 
     def draw_cover(self, rec, x, y):
         p = self.p
@@ -827,10 +883,11 @@ class TagForgeApp:
         except Exception:
             return None
         try:
+            size = max(1, S(100))
             im = Image.open(io.BytesIO(data)).convert("RGB")
-            im.thumbnail((100, 100))
-            canvas_img = Image.new("RGB", (100, 100), (26, 29, 35))
-            canvas_img.paste(im, ((100 - im.width) // 2, (100 - im.height) // 2))
+            im.thumbnail((size, size))
+            canvas_img = Image.new("RGB", (size, size), (26, 29, 35))
+            canvas_img.paste(im, ((size - im.width) // 2, (size - im.height) // 2))
             buf = io.BytesIO()
             canvas_img.save(buf, format="PNG")
             return tk.PhotoImage(data=base64.b64encode(buf.getvalue()), format="png")
@@ -887,6 +944,14 @@ class TagForgeApp:
         self.scroll = 0
         self.redraw()
 
+    def scan_from_entry(self):
+        path = self.e_path.value()
+        if not path or not os.path.isdir(path):
+            messagebox.showerror("目录无效", f"不是有效的文件夹：\n{path}")
+            return
+        self.scan(path)
+        self.redraw()
+
     def choose_dir(self):
         path = filedialog.askdirectory(initialdir=self.root_dir or os.getcwd(), title="选择音乐目录")
         if path:
@@ -929,16 +994,19 @@ class TagForgeApp:
         self.redraw()
 
     # ---------------- 单元格编辑 ----------------
-    def begin_edit(self, rec, field, col_x, row_y, col_w):
+    def begin_edit(self, rec, field, col_x, row_y, col_w, height: int = 0, pad: int = 4):
         self.set_active(rec["path"])
         self._cancel_edit()
         cur = self.value(rec, field)
-        e = tk.Entry(self.canvas, bg=BG, fg=TEXT, insertbackground=TEXT, bd=0,
+        height = height or (ROW_H - 8)
+        e = tk.Entry(self.canvas, bg=CTRL if pad == 0 else BG, fg=TEXT,
+                     insertbackground=TEXT, bd=0,
                      highlightthickness=1, highlightbackground=ACCENT,
                      highlightcolor=ACCENT, font=F(13))
         e.insert(0, cur)
         e.select_range(0, "end")
-        e.place(x=S(col_x + 4), y=S(row_y + 4), width=S(max(40, col_w - 8)), height=S(ROW_H - 8))
+        e.place(x=S(col_x + pad), y=S(row_y + pad),
+                width=S(max(40, col_w - pad * 2)), height=S(height - pad * 2))
         e.focus_set()
         e.bind("<Return>", lambda ev: self._commit_edit())
         e.bind("<Escape>", lambda ev: self._cancel_edit())
@@ -987,14 +1055,18 @@ class TagForgeApp:
         except Exception as exc:
             messagebox.showerror("保存失败", str(exc))
             return
-        self.staged.clear()
-        self.scan()
+        # 只丢弃"确实写成功"的暂存；失败与已丢失文件保留，便于重试或另存
+        bad = {f["path"] for f in result["failed"]} | set(result.get("missing") or [])
+        self.staged = {p: v for p, v in self.staged.items() if p in bad}
+        self.scan(preserve=True)
         self.redraw()
-        if result["failed"]:
-            detail = "\n".join(f"{os.path.basename(f['path'])}: {f['error']}"
-                               for f in result["failed"][:6])
-            messagebox.showwarning("部分文件保存失败",
-                                   f"成功 {result['applied']} 个，失败 {len(result['failed'])} 个\n\n{detail}")
+
+        if result["failed"] or result.get("missing"):
+            lines = [f"{os.path.basename(f['path'])}: {f['error']}" for f in result["failed"][:6]]
+            lines += [f"{os.path.basename(p)}: 文件已不存在" for p in (result.get("missing") or [])[:6]]
+            messagebox.showwarning(
+                "部分文件保存失败",
+                f"成功 {result['applied']} 个，失败/丢失 {len(bad)} 个\n\n" + "\n".join(lines))
         else:
             messagebox.showinfo("TagForge", f"已保存 {result['applied']} 个文件。")
 
@@ -1003,6 +1075,13 @@ class TagForgeApp:
         if not paths:
             messagebox.showinfo("TagForge", "请先勾选要处理的文件。")
             return
+        if self.staged:
+            # 批量写入会重扫列表；不提示就重扫会把手改的内容一起丢掉
+            if not messagebox.askyesno(
+                "还有未保存的修改",
+                f"当前有 {self.dirty_count()} 处未保存的单元格修改。\n"
+                f"批量写入不会保存它们，确定继续吗？"):
+                return
         patch = {k: self.b_fields[k].value() for k in ("album", "albumartist", "year", "genre")}
         patch = {k: v for k, v in patch.items() if v}
         if self.batch_cover:
@@ -1018,14 +1097,18 @@ class TagForgeApp:
         except Exception as exc:
             messagebox.showerror("批量写入失败", str(exc))
             return
-        for entry in self.b_fields.values():
-            entry.set_value("")
-        self.batch_cover, self.batch_cover_name = None, ""
-        self.scan()
+        if result["applied"]:
+            # 只有真的写成功才清空输入；失败时保留便于重试
+            for entry in self.b_fields.values():
+                entry.set_value("")
+            self.batch_cover, self.batch_cover_name = None, ""
+        self.scan(preserve=True)
         self.redraw()
         if result["failed"]:
+            detail = "\n".join(f"{os.path.basename(f['path'])}: {f['error']}"
+                               for f in result["failed"][:6])
             messagebox.showwarning("部分文件写入失败",
-                                   f"成功 {result['applied']} 个，失败 {len(result['failed'])} 个")
+                                   f"成功 {result['applied']} 个，失败 {len(result['failed'])} 个\n\n{detail}")
         else:
             messagebox.showinfo("TagForge", f"已写入 {result['applied']} 个文件。")
 
@@ -1052,9 +1135,23 @@ class TagForgeApp:
         if not messagebox.askyesno("移除封面", f"移除 {len(paths)} 个文件的封面？"):
             return
         changes = [{"path": p, "patch": {"cover": {"op": "remove"}}} for p in paths]
-        library.apply_changes(changes, label="移除封面")
-        self.scan()
+        result = library.apply_changes(changes, label="移除封面")
+        self.scan(preserve=True)
         self.redraw()
+        if result["failed"]:
+            messagebox.showwarning("部分文件移除失败",
+                                   f"成功 {result['applied']} 个，失败 {len(result['failed'])} 个")
+
+    @staticmethod
+    def _backup_sample(backup_id: str) -> str:
+        """取备份里第一个文件的相对位置，让确认框能说清"要回退的是哪一批"。"""
+        try:
+            data = library._load_backup(backup_id)
+        except Exception:
+            return ""
+        for entry in data.get("files", []):
+            return os.path.basename(entry.get("path", ""))
+        return ""
 
     def undo_last(self):
         items = library.list_backups(1)
@@ -1064,17 +1161,30 @@ class TagForgeApp:
         backup = items[0]
         import time
         stamp = time.strftime("%H:%M", time.localtime(backup["created"]))
-        dlg = ConfirmUndo(self, backup, stamp, self.dirty_count())
+        dlg = ConfirmUndo(self, backup, stamp, self.dirty_count(),
+                          sample=self._backup_sample(backup["id"]))
         self.root.wait_window(dlg)
         if dlg.result:
             result = library.undo(backup["id"])
-            self.scan()
+            # preserve：确认框承诺"未保存的修改会保留"，这里必须兑现
+            self.scan(preserve=True)
             self.redraw()
-            messagebox.showinfo("TagForge", f"已恢复 {result['restored']} 个文件。")
+            msg = f"已恢复 {result['restored']} 个文件。"
+            if result.get("skipped"):
+                msg += f"\n\n{len(result['skipped'])} 个文件缺少可用快照，已跳过（未改动）。"
+            if result["failed"]:
+                msg += f"\n{len(result['failed'])} 个文件回退失败。"
+            messagebox.showinfo("TagForge", msg)
 
     # ---------------- 对话框 ----------------
+    def target_paths(self) -> list[str]:
+        """批量类对话框的作用范围：有勾选就用勾选，否则用当前筛选出的全部。"""
+        if self.checks:
+            return [r["path"] for r in self.visible() if r["path"] in self.checks]
+        return [r["path"] for r in self.visible()]
+
     def open_from_names(self):
-        targets = self.selected_paths() or [r["path"] for r in self.visible()]
+        targets = self.target_paths()
         if not targets:
             messagebox.showinfo("TagForge", "没有可处理的文件。")
             return
@@ -1089,7 +1199,7 @@ class TagForgeApp:
             self.redraw()
 
     def open_rename(self):
-        targets = self.selected_paths() or [r["path"] for r in self.visible()]
+        targets = self.target_paths()
         if not targets:
             messagebox.showinfo("TagForge", "没有可处理的文件。")
             return
@@ -1132,6 +1242,7 @@ class Dialog(tk.Toplevel):
         self.p = Painter(self.canvas)
         Painter.current = self.p
 
+        Painter.current = self.p
         self.canvas.bind("<Button-1>", self._on_click)
         self.bind("<Escape>", lambda e: self.close())
         for widget in (self.canvas,):
@@ -1164,6 +1275,9 @@ class Dialog(tk.Toplevel):
             self.grab_release()
         except tk.TclError:
             pass
+        # 关键：Painter.current 被对话框覆盖过，销毁后必须归还给主窗口。
+        # 否则主窗口下一次重绘会去操作已销毁的画布，抛 TclError 并留下空白界面。
+        Painter.current = self.app.p
         self.destroy()
 
     def draw_head(self):
@@ -1188,6 +1302,9 @@ class FromNamesDialog(Dialog):
         self.rows = []
         self.stat = ""
         self.can_write = False
+        self.previewed_key = None     # 预览时的参数快照，用于阻止"改了模板直接写"
+        self.quota = 5
+        self.offset = 0
 
         self.tpl = naming.guess_template([i["path"] for i in items], root_dir, self.use_path)
         self.e_tpl = tk.Entry(self.canvas, bg=CTRL, fg=TEXT, insertbackground=TEXT, bd=0,
@@ -1196,7 +1313,21 @@ class FromNamesDialog(Dialog):
         self.e_tpl.insert(0, self.tpl)
         self.e_tpl.place(x=S(20 + 44), y=S(52 + 20 + 4), width=S(1080 - 62 - 44 - 20), height=S(24))
         self.e_tpl.bind("<Return>", lambda e: self.preview())
+        self.e_tpl.bind("<KeyRelease>", lambda e: self._invalidate())
+        self.canvas.bind("<MouseWheel>", self._on_wheel, add="+")
         self.draw()
+
+    def _invalidate(self):
+        """模板/选项变了，旧的预览结果不再可信 → 立即禁用写入。"""
+        if self.can_write or self.rows:
+            self.can_write = False
+            self.previewed_key = None
+            self.rows = []
+            self.stat = "参数已修改，请重新预览"
+            self.draw()
+
+    def _key(self):
+        return (self.e_tpl.get().strip(), self.use_path, self.overwrite)
 
     def draw(self):
         p = self.p
@@ -1224,50 +1355,59 @@ class FromNamesDialog(Dialog):
         y += 30 + 14
 
         # 预览表
-        tw, th = self.w - 42, self.h - 2 - y - 20
-        p.rect(20, y, tw, th, BG)
+        tw = self.w - 42
+        th = self.h - 2 - y - 20
         p.rrect(20, y, tw, th, 8, fill=BG, outline=LINE_SOFT)
         p.rect(21, y + 1, tw - 2, 32, PANEL)
         p.line(21, y + 33, 20 + tw - 1, y + 33, LINE_SOFT)
-        cols = [(20, 230, "文件"), (250, None, "解析文本"), (None, 120, "albumartist"),
-                (None, 64, "track"), (None, None, "title"), (None, 96, "将写入")]
         widths = [230, 0, 120, 64, 0, 96]
-        fixed = sum(widths)
-        flex = (tw - fixed) / 2
+        flex = (tw - sum(widths)) / 2
         widths = [w if w else flex for w in widths]
-        x = 21
-        for (_, _, label), w in zip(cols, widths):
-            p.text(x + 10, y + 17, label, F(12), DIM, width=w - 20)
-            x += w
         self.cols_x = []
         x = 21
-        for w in widths:
-            self.cols_x.append((x, w))
-            x += w
+        for width in widths:
+            self.cols_x.append((x, width))
+            x += width
+        for (cx, cw), label in zip(self.cols_x,
+                                   ("文件", "解析文本", "albumartist", "track", "title", "将写入")):
+            p.text(cx + 10, y + 17, label, F(12), DIM, width=cw - 20)
 
         top = y + 34
-        for i, row in enumerate(self.rows[:5]):
+        self.quota = max(1, int((th - 34 - 16) / 30))      # 底部留 16px 给翻页提示
+        visible_rows = self.rows[self.offset:self.offset + self.quota]
+        for i, row in enumerate(visible_rows):
             self.draw_preview_row(row, top + i * 30)
+        if len(self.rows) > self.quota:
+            p.text(self.w - 30, y + th - 12,
+                   f"{self.offset + 1}-{self.offset + len(visible_rows)} / 共 {len(self.rows)} 行"
+                   "（滚轮翻页）", F(11), FAINT, anchor="e")
 
     def draw_preview_row(self, row, y):
         p = self.p
         if not row:
             return
-        kind = row.get("kind")
-        if kind == "bad":
+        if row.get("kind") == "bad":
             p.rect(21, y, self.w - 44, 30, ROW_ERROR)
-        cells = row["cells"]
-        for (x, w), (text, tone) in zip(self.cols_x, cells):
+        for (x, w), (text, tone) in zip(self.cols_x, row["cells"]):
             color = {"amber": DIRTY, "ok": OK, "bad": DANGER, "faint": FAINT}.get(tone, TEXT)
             p.text(x + 10, y + 15, text, F(13), color, width=w - 20)
 
+    def _on_wheel(self, event):
+        if len(self.rows) <= self.quota:
+            return
+        offset = self.offset + (-1 if event.delta > 0 else 1)
+        offset = max(0, min(offset, len(self.rows) - self.quota))
+        if offset != self.offset:
+            self.offset = offset
+            self.draw()
+
     def toggle_path(self):
         self.use_path = not self.use_path
-        self.draw()
+        self._invalidate()
 
     def toggle_overwrite(self):
         self.overwrite = not self.overwrite
-        self.draw()
+        self._invalidate()
 
     def preview(self):
         tpl = self.e_tpl.get().strip()
@@ -1278,26 +1418,28 @@ class FromNamesDialog(Dialog):
             messagebox.showerror("模板错误", str(exc), parent=self)
             return
         self.rows = []
-        for row in data["rows"][:5]:
+        for row in data["rows"]:
+            name = os.path.basename(row["path"])
             if not row["matched"]:
+                reason = row.get("reason") or "无法匹配模板"
                 self.rows.append({"kind": "bad", "cells": [
-                    (os.path.basename(row["path"]), ""),
-                    ("无法匹配模板，文件名缺少对应字段", "bad"),
+                    (name, ""), (reason, "bad"),
                     ("—", "bad"), ("—", "bad"), ("—", "bad"), ("解析失败", "bad")]})
                 continue
             if not row["changes"]:
                 self.rows.append({"kind": "faint", "cells": [
-                    (os.path.basename(row["path"]), ""), (row["target"], "faint"),
+                    (name, ""), (row["target"], "faint"),
                     ("—", "faint"), ("—", "faint"), ("—", "faint"), ("无变化", "faint")]})
                 continue
             parsed = row["parsed"]
             self.rows.append({"kind": "ok", "cells": [
-                (os.path.basename(row["path"]), ""),
+                (name, ""),
                 (row["target"], "amber"),
                 (parsed.get("albumartist", "—"), "amber"),
                 (parsed.get("track", "—"), "amber"),
                 (parsed.get("title", "—"), "amber"),
                 (f"{len(row['changes'])} 字段", "ok")]})
+
         writable = sum(1 for r in data["rows"] if r["changes"])
         failed = sum(1 for r in data["rows"] if not r["matched"])
         unchanged = sum(1 for r in data["rows"] if r["matched"] and not r["changes"])
@@ -1310,26 +1452,33 @@ class FromNamesDialog(Dialog):
             parts.append(f"{unchanged} 个无变化")
         self.stat = " · ".join(parts) or "没有可写入的字段"
         self.can_write = writable > 0
+        self.previewed_key = self._key()
+        self.offset = 0
         self.draw()
 
     def apply(self):
-        tpl = self.e_tpl.get().strip()
-        if not self.rows:
-            self.preview()
+        if self._key() != self.previewed_key:
+            messagebox.showinfo("TagForge", "模板或选项已修改，请先重新预览。", parent=self)
+            return
+        tpl, use_path, overwrite = self.previewed_key
         try:
             data = library.preview_from_names(self.items, tpl, self.root_dir,
-                                              self.use_path, self.overwrite)
+                                              use_path, overwrite)
         except Exception as exc:
             messagebox.showerror("模板错误", str(exc), parent=self)
             return
-        changes = [{"path": r["path"], "patch": r["changes"]} for r in data["rows"] if r["changes"]]
+        changes = [{"path": r["path"], "patch": r["changes"]}
+                   for r in data["rows"] if r["changes"]]
         if not changes:
             messagebox.showinfo("TagForge", "没有可写入的字段。", parent=self)
             return
         result = library.apply_changes(changes, mode="overwrite", label="从文件名生成标签")
         self.applied = True
         self.close()
-        messagebox.showinfo("TagForge", f"已写入 {result['applied']} 个文件。")
+        msg = f"已写入 {result['applied']} 个文件。"
+        if result["failed"]:
+            msg += f"\n{len(result['failed'])} 个失败。"
+        messagebox.showinfo("TagForge", msg)
 
 
 class RenameDialog(Dialog):
@@ -1345,6 +1494,9 @@ class RenameDialog(Dialog):
         self.stat = ""
         self.plan = []
         self.can_apply = False
+        self.previewed_key = None
+        self.quota = 4
+        self.offset = 0
 
         self.e_tpl = tk.Entry(self.canvas, bg=CTRL, fg=TEXT, insertbackground=TEXT, bd=0,
                               highlightthickness=1, highlightbackground=LINE,
@@ -1352,7 +1504,21 @@ class RenameDialog(Dialog):
         self.e_tpl.insert(0, "%track:2% - %title%")
         self.e_tpl.place(x=S(20 + 44), y=S(52 + 20 + 4), width=S(1080 - 62 - 44 - 20), height=S(24))
         self.e_tpl.bind("<Return>", lambda e: self.preview())
+        self.e_tpl.bind("<KeyRelease>", lambda e: self._invalidate())
+        self.canvas.bind("<MouseWheel>", self._on_wheel, add="+")
         self.draw()
+
+    def _invalidate(self):
+        if self.can_apply or self.plan:
+            self.can_apply = False
+            self.previewed_key = None
+            self.plan = []
+            self.rows = []
+            self.stat = "参数已修改，请重新预览"
+            self.draw()
+
+    def _key(self):
+        return (self.e_tpl.get().strip(), self.keep_dir, self.skip_exist)
 
     def draw(self):
         p = self.p
@@ -1377,50 +1543,64 @@ class RenameDialog(Dialog):
             p.text(self.w - 22, y + 15, self.stat, F(13), DIM, anchor="e")
         y += 30 + 14
 
-        tw, th = self.w - 42, self.h - 2 - y - 20
+        tw = self.w - 42
+        th = self.h - 2 - y - 20
         p.rrect(20, y, tw, th, 8, fill=BG, outline=LINE_SOFT)
         p.rect(21, y + 1, tw - 2, 32, PANEL)
         p.line(21, y + 33, 20 + tw - 1, y + 33, LINE_SOFT)
-        flex = (tw - 120) / 2
-        self.cols_x = [(21, flex), (21 + flex, flex), (21 + 2 * flex, 120)]
+        flex = (tw - 140) / 2
+        self.cols_x = [(21, flex), (21 + flex, flex), (21 + 2 * flex, 140)]
         for (x, w), label in zip(self.cols_x, ("原文件名", "新文件名", "状态")):
             p.text(x + 10, y + 17, label, F(12), DIM, width=w - 20)
 
         top = y + 34
-        for i, row in enumerate(self.rows[:4]):
+        self.quota = max(1, int((th - 34 - 16) / 30))      # 底部留 16px 给翻页提示
+        visible_rows = self.rows[self.offset:self.offset + self.quota]
+        for i, row in enumerate(visible_rows):
             self.draw_row(row, top + i * 30)
+        if len(self.rows) > self.quota:
+            p.text(self.w - 30, y + th - 12,
+                   f"{self.offset + 1}-{self.offset + len(visible_rows)} / 共 {len(self.rows)} 行"
+                   "（滚轮翻页）", F(11), FAINT, anchor="e")
 
     def draw_row(self, row, y):
         p = self.p
-        bad = row["bad"]
-        if bad:
+        if row["bad"]:
             p.rect(21, y, self.w - 44, 30, ROW_ERROR)
         for (x, w), (text, tone) in zip(self.cols_x, row["cells"]):
             color = {"amber": DIRTY, "ok": OK, "bad": DANGER, "faint": FAINT}.get(tone, TEXT)
             p.text(x + 10, y + 15, text, F(13), color, width=w - 20)
 
+    def _on_wheel(self, event):
+        if len(self.rows) <= self.quota:
+            return
+        offset = self.offset + (-1 if event.delta > 0 else 1)
+        offset = max(0, min(offset, len(self.rows) - self.quota))
+        if offset != self.offset:
+            self.offset = offset
+            self.draw()
+
     def toggle_dir(self):
         self.keep_dir = not self.keep_dir
-        self.draw()
+        self._invalidate()
 
     def toggle_skip(self):
         self.skip_exist = not self.skip_exist
-        self.draw()
+        self._invalidate()
 
     def preview(self):
         tpl = self.e_tpl.get().strip()
         try:
-            data = library.plan_rename(self.items, tpl, self.root_dir, self.keep_dir)
+            data = library.plan_rename(self.items, tpl, self.root_dir,
+                                       self.keep_dir, self.skip_exist)
         except Exception as exc:
             messagebox.showerror("模板错误", str(exc), parent=self)
             return
         self.plan = data["rows"]
         self.rows = []
-        conflict = 0
-        for row in self.plan[:4]:
+        for row in self.plan:
             old = os.path.basename(row["path"])
             if row.get("error"):
-                conflict += 1
                 self.rows.append({"bad": True, "cells": [
                     (old, "bad"), (row.get("rel") or "—", "bad"), (row["error"], "bad")]})
             elif row.get("unchanged"):
@@ -1430,40 +1610,51 @@ class RenameDialog(Dialog):
                 new_name = row.get("rel") or old
                 if self.keep_dir:      # 保留目录结构时只显示文件名，目录不变
                     new_name = new_name.rsplit("/", 1)[-1]
+                label = "将覆盖" if row.get("overwrite") else "可重命名"
                 self.rows.append({"bad": False, "cells": [
-                    (old, "faint"), (new_name, "amber"), ("可重命名", "ok")]})
-        total_conflict = sum(1 for r in self.plan if r.get("error"))
-        movable = sum(1 for r in self.plan if r.get("target") and not r.get("error") and not r.get("unchanged"))
+                    (old, "faint"), (new_name, "amber"), (label, "ok")]})
+
+        conflicts = sum(1 for r in self.plan if r.get("error"))
+        movable = sum(1 for r in self.plan
+                      if r.get("target") and not r.get("error") and not r.get("unchanged"))
+        unchanged = sum(1 for r in self.plan if r.get("unchanged"))
         parts = []
         if movable:
             parts.append(f"{movable} 个可重命名")
-        if total_conflict:
-            parts.append(f"{total_conflict} 个冲突")
-        unchanged_n = sum(1 for r in self.plan if r.get("unchanged"))
-        if unchanged_n:
-            parts.append(f"{unchanged_n} 个未变化")
+        if conflicts:
+            parts.append(f"{conflicts} 个冲突")
+        if unchanged:
+            parts.append(f"{unchanged} 个未变化")
         self.stat = " · ".join(parts) or "没有可重命名的文件"
         self.can_apply = movable > 0
+        self.previewed_key = self._key()
+        self.offset = 0
         self.draw()
 
     def apply(self):
-        if not self.plan:
-            self.preview()
-        rows = [r for r in self.plan if r.get("target") and not r.get("error") and not r.get("unchanged")]
+        if self._key() != self.previewed_key:
+            messagebox.showinfo("TagForge", "模板或选项已修改，请先重新预览。", parent=self)
+            return
+        rows = [r for r in self.plan
+                if r.get("target") and not r.get("error") and not r.get("unchanged")]
         if not rows:
             messagebox.showinfo("TagForge", "没有可重命名的文件。", parent=self)
             return
         result = library.apply_rename(rows)
         self.applied = True
         self.close()
-        messagebox.showinfo("TagForge", f"已重命名 {result['moved']} 个文件。")
+        msg = f"已重命名 {result['moved']} 个文件。"
+        if result["failed"]:
+            msg += f"\n{len(result['failed'])} 个失败。"
+        messagebox.showinfo("TagForge", msg)
 
 
 class ConfirmUndo(Dialog):
-    def __init__(self, master, backup, stamp, dirty):
+    def __init__(self, master, backup, stamp, dirty, sample: str = ""):
         self.backup = backup
         self.stamp = stamp
         self.dirty = dirty
+        self.sample = sample
         super().__init__(master, "撤销上次保存？", 420, 190)
         self.draw()
 
@@ -1472,10 +1663,12 @@ class ConfirmUndo(Dialog):
         p.c.delete("all")
         p.hits.clear()
         p.text(20, 30, "撤销上次保存？", F(15, True), TEXT)
-        msg = (f"将回退 {self.stamp} 的备份，涉及 {self.backup['files']} 个文件。"
-               f"你还有 {self.dirty} 处未保存修改，撤销只回退已写入的部分，这些修改会保留。")
+        # \u00A0 绑定"数字 + 量词"，避免折行时把 "5 处" 拆到两行
+        msg = (f"将回退 {self.stamp} 的备份，涉及 {self.backup['files']}\u00A0个文件。"
+               f"撤销只回退已写入的部分；你还有 {self.dirty}\u00A0处未保存修改，它们会保留。")
         p.paragraph(20, 56, msg, F(13), DIM, self.w - 34)
-        p.text(20, 132, f"备份点 {self.stamp} · 保存前 · {self.backup.get('label', '')}",
+        where = self.sample or self.backup.get("label", "")
+        p.text(20, 132, f"备份点 {self.stamp} · {self.backup['files']} 个文件 · {where}",
                F(11, mono=True), FAINT, width=self.w - 40)
 
         p.button(self.w - 42 - 78 - 90, 148, 78, 30, "取消", "secondary", self.close, spec=F(13))

@@ -84,9 +84,9 @@
 | F10 | 批量写封面 | 批量条选图 | `pick_cover` + `apply_batch` | 同上（patch 含 cover） |
 | F11 | 批量移除封面 | 批量条 | `remove_cover` | 同上（`{op:remove}`） |
 | F12 | 从文件名/目录结构生成（先预览） | 「生成」 | `FromNamesDialog` | `preview_from_names` → `naming.parse` → 可选写入 |
-| F13 | 按标签重命名（冲突检测 + 预览） | 「改名」 | `RenameDialog` | `plan_rename` / `apply_rename` |
+| F13 | 按标签重命名（冲突检测 + 预览 + 两阶段互换） | 「改名」 | `RenameDialog` | `plan_rename(..., skip_exist)` / `apply_rename` |
 | F14 | 保存暂存（Ctrl+S，徽标显脏字段数） | 「保存修改」 | `save` | `apply_changes(mode=overwrite)` |
-| F15 | 撤销上一步（整批回退） | 「撤销」 | `undo_last` / `ConfirmUndo` | `list_backups` / `undo` |
+| F15 | 撤销上一步（整批回退，可再撤销） | 「撤销」 | `undo_last` / `ConfirmUndo` | `list_backups` / `undo(snapshot_before=True)` |
 | F16 | 计数与空态 | 顶栏、批量条 | `dirty_count` / 各 `draw_*` | — |
 | F17 | 字体与 DPI 适配 | 启动 | `resolve_ui_font` / `detect_scale` | `TkDefaultFont`、`GetDpiForSystem` |
 | F18 | 安全底账（写前快照、失败回滚） | 隐式（F15 可见） | — | `snapshot` / `_restore_one` |
@@ -175,8 +175,18 @@
 ### 5.4 备份快照（undo 日志）
 ```python
 {"id": "20261027-181645-856", "created": 1761552000.0, "label": "批量设置专辑",
- "files": [{"path": "...", "fields": {...}, "cover": {"mime": "image/png", "b64": "..."}}]}
+ "files": [{"path": "...",
+            "fields": {"title": "A", "artist": "A; B", ...},   # canonical 字符串
+            "lists":  {"artist": ["A; B"]},                    # 多值原貌（无损撤销）
+            "cover":  {"mime": "image/png", "b64": "..."}}]}
 ```
+
+- `lists` 是 0.2.2 新增的：字符串 `"A; B"` 可能是两个值，也可能是一个含分号的单值，
+  只有原始列表能无损还原。
+- 读取失败的文件记 `error` 字段；`undo` 遇到 `error` 直接跳过，**不会**把它当成"字段为空 → 全部删除"。
+- 每条备份保留最近 `MAX_BACKUPS = 50` 条，超出按时间裁剪（含封面 base64，不裁剪会无限膨胀）。
+- 撤销后写 `<id>.used` 标记，`list_backups` 跳过已消费项 → 连点撤销会继续往前回退，而不是重复回退同一批。
+- `undo(snapshot_before=True)` 会先给"撤销前"的状态拍一张，所以撤销本身也可撤销。
 
 ### 5.5 界面状态（`TagForgeApp` 的属性）
 ```python
@@ -198,9 +208,11 @@ record ────────────→ staged ────────�
    ↑                    │                                        │
    └──── 改回原值 / Esc ──┘                              staged 清空
 ```
-- 单元格"脏"= 该字段在 staged 中存在且值不同。
-- 保存失败：staged 保留（不丢用户输入），只弹失败清单。
-- 撤销作用于磁盘历史，与 staged 无关；有未保存修改时确认框会说明这一点。
+- 单元格"脏"= 该字段在 staged 中存在且值不同；脏且为空表示"待删除"，用琥珀色区分。
+- 保存失败：只移除写成功项的 staged，失败与"文件已不存在"的项保留，可重试。
+- 撤销作用于磁盘历史；`undo_last` 用 `scan(preserve=True)` 保留 staged 与勾选，
+  与确认框"这些修改会保留"的承诺一致。
+- `scan(preserve=False)`（默认，切目录/改递归时）才清空 staged / checks / active。
 
 ## 7. 两条数据流约束
 
